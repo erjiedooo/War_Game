@@ -100,6 +100,7 @@ button { color: inherit; }
 .territory.is-valid-target .territory-shape { stroke: #f0c76f; stroke-width: 4; stroke-dasharray: 10 7; animation: target-pulse .9s ease-in-out infinite alternate; }
 .territory.has-order .territory-shape { stroke: #82dcea; stroke-width: 3; }
 .territory.is-selected .territory-shape { stroke: #f0c76f; stroke-width: 3.5; }
+.territory.is-multi-selected .territory-shape { stroke: #7fe8ff; stroke-width: 4.5; stroke-dasharray: 4 3; filter: brightness(1.18) drop-shadow(0 0 5px rgba(127,232,255,.65)); }
 .territory.is-encircled .territory-shape { stroke: #e26058; stroke-width: 3.5; stroke-dasharray: 5 4; }
 .territory.just-fought .territory-shape { animation: battle-flash .8s ease-out; }
 .territory-label { pointer-events: none; text-anchor: middle; fill: #eef3ec; font-size: 14px; font-weight: 750; paint-order: stroke; stroke: rgba(5,12,13,.9); stroke-width: 4px; stroke-linejoin: round; }
@@ -108,6 +109,7 @@ button { color: inherit; }
 .army-node:active { cursor: grabbing; }
 .army-node circle { fill: #071214; stroke: var(--owner-color); stroke-width: 3; vector-effect: non-scaling-stroke; transition: transform .15s, filter .15s; }
 .army-node.is-player circle { filter: drop-shadow(0 0 7px color-mix(in srgb, var(--owner-color) 78%, transparent)); }
+.army-node.is-multi-selected circle { stroke: #9cf1ff; stroke-width: 4.5; filter: drop-shadow(0 0 8px rgba(112,226,255,.9)); }
 .army-node.is-player:hover circle, .army-node.is-player:focus circle { transform: scale(1.12); }
 .army-node text { pointer-events: none; text-anchor: middle; fill: #fff6df; font: 750 17px Georgia, serif; }
 .status-icons { pointer-events: none; text-anchor: middle; fill: #f1cf82; font-size: 9px; font-weight: 800; paint-order: stroke; stroke: #071214; stroke-width: 2px; }

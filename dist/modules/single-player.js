@@ -3,7 +3,7 @@ import {
   CONSTRUCTION_TURNS, DESERT_ATTRITION_RATE, EIGHT_FACTION_IDS, EIGHT_TERRITORY_GROUPS,
   ENCIRCLED_DEFENSE_MULTIPLIER, FACTIONS, FACTION_IDS, GAME_MODES, GROWTH_PER_TERRITORY,
   LANDING_ATTRITION_RATE, MAP_SIZE, MAX_AIRPORTS_PER_FACTION, MAX_TROOPS, METROPOLIS_DEFENSE_MULTIPLIER,
-  METROPOLIS_MAX_TROOPS, MIN_VIEW_SIZE, MOUNTAIN_ATTRITION_RATE,
+  METROPOLIS_MAX_TROOPS, MIN_VIEW_SIZE, MOUNTAIN_ATTRITION_RATE, LAND_RELAY_RANGE_KM,
   MOUNTAIN_DEFENSE_MULTIPLIER, NEUTRAL, RIVER_ATTRITION_RATE,
 } from "./config.js";
 import {
@@ -104,6 +104,7 @@ function createState(playerFaction, mode = "ten") {
     fleets: [],
     selectedOrderKey: null,
     selectedTerritoryId: playerFaction ? FACTIONS[playerFaction].start : null,
+    selectedSourceIds: new Set(),
     orderMode: "land",
     notice: null,
     history: [],
@@ -331,8 +332,10 @@ function territoryCap(territory) {
 function routeCandidates(source, target) {
   const candidates = [];
   if (territoryAdjacency[source]?.includes(target)) candidates.push([source, target]);
-  for (const intermediate of territoryAdjacency[source] ?? []) {
-    if (intermediate !== target && state.territories[intermediate].owner === state.territories[source].owner && territoryAdjacency[intermediate]?.includes(target)) candidates.push([source, intermediate, target]);
+  if (haversineKm(TERRITORIES[source].label, TERRITORIES[target].label) <= LAND_RELAY_RANGE_KM) {
+    for (const intermediate of territoryAdjacency[source] ?? []) {
+      if (intermediate !== target && state.territories[intermediate].owner === state.territories[source].owner && territoryAdjacency[intermediate]?.includes(target)) candidates.push([source, intermediate, target]);
+    }
   }
   return candidates;
 }
@@ -424,7 +427,9 @@ function reachableTargets(source, mode, territories = state.territories) {
   const targets = new Set(territoryAdjacency[source] ?? []);
   for (const neighbor of territoryAdjacency[source] ?? []) {
     if (territories[neighbor].owner !== territories[source].owner) continue;
-    for (const second of territoryAdjacency[neighbor] ?? []) if (second !== source) targets.add(second);
+    for (const second of territoryAdjacency[neighbor] ?? []) {
+      if (second !== source && haversineKm(TERRITORIES[source].label, TERRITORIES[second].label) <= LAND_RELAY_RANGE_KM) targets.add(second);
+    }
   }
   return [...targets];
 }
@@ -582,6 +587,7 @@ function updateMap() {
     node.classList.toggle("has-order", ordersFromSource(id).length > 0);
     node.classList.toggle("just-fought", state.flashIds.has(id));
     node.classList.toggle("is-selected", state.selectedTerritoryId === id);
+    node.classList.toggle("is-multi-selected", state.selectedSourceIds.has(id));
     node.classList.toggle("is-encircled", encircled.has(id));
     const mountainText = TERRITORIES[id].mountainRanges.length ? `山脉影响：${TERRITORIES[id].mountainRanges.join("、")}` : "无山脉影响";
     const statusText = [territory.capitalOf ? "首都" : "", territory.metropolis ? "特大城市" : "", territory.airport ? "机场" : "", territory.port ? "港口" : "", encircled.has(id) ? "被包围" : ""].filter(Boolean).join("，");
@@ -593,6 +599,7 @@ function updateMap() {
     label.style.setProperty("--owner-color", FACTIONS[territory.owner].color);
     const army = label.querySelector(".army-node");
     army.classList.toggle("is-player", Boolean(state.playerFaction && territory.owner === state.playerFaction));
+    army.classList.toggle("is-multi-selected", state.selectedSourceIds.has(id));
     army.setAttribute("aria-label", `${TERRITORIES[id].name}兵力${territory.troops}${territory.owner === state.playerFaction ? "，可拖动部署" : ""}`);
     army.querySelector("text").textContent = territory.troops;
     const icons = [territory.capitalOf ? "◆" : "", territory.metropolis ? "★" : "", territory.airport ? "✈" : "", territory.port ? "⚓" : "", territory.construction ? "⌛" : "", encircled.has(id) ? "⊘" : ""].filter(Boolean).join("");
@@ -654,13 +661,17 @@ function renderSummary() {
       && (state.territories[territoryId].airport || state.territories[territoryId].construction?.type === "airport")).length;
     const canBuildAirport = !selected.airport && !selected.construction && airportCount < MAX_AIRPORTS_PER_FACTION;
     const canBuildPort = COASTAL_TERRITORIES.has(id) && !selected.port && !selected.construction;
+    const selectedSources = [...state.selectedSourceIds].filter((sourceId) => state.territories[sourceId]?.owner === state.playerFaction);
+    const multiSelectNotice = selectedSources.length
+      ? `<p class="command-notice">已多选 ${selectedSources.length} 座城市。拖动任一已选兵力圆圈，将从每城派出全部可用兵力；不合法或超过 ${LAND_RELAY_RANGE_KM} 公里的跨城路线会被跳过。</p>`
+      : "";
     dom.summary.innerHTML = `<span class="eyebrow">城市与建设</span><h2>${TERRITORIES[id].name} · ${selected.troops}/${territoryCap(selected)} 兵</h2>
       <div class="territory-meta">${status.map((item) => `<span>${item}</span>`).join("")}</div>
       <p>${construction || `${routeModeLabel(state.orderMode)}模式已启用；每个据点最多两路，合计至少留下 1 名守军。`}</p>
       <div class="build-actions">
         <button type="button" data-build="airport" ${canBuildAirport ? "" : "disabled"}>${selected.airport ? "机场已建成" : airportCount >= MAX_AIRPORTS_PER_FACTION ? `机场已达上限 ${MAX_AIRPORTS_PER_FACTION}` : "修建机场 · 8回合"}</button>
         <button type="button" data-build="port" ${canBuildPort ? "" : "disabled"}>${selected.port ? "港口已建成" : COASTAL_TERRITORIES.has(id) ? "修建港口 · 8回合" : "非沿海城市"}</button>
-      </div>${notice}`;
+      </div>${multiSelectNotice}${notice}`;
     dom.summary.querySelectorAll("[data-build]").forEach((button) => button.addEventListener("click", () => startConstruction(id, button.dataset.build)));
     return;
   }
@@ -743,15 +754,23 @@ function beginDrag(event) {
   if (!army) return;
   const source = army.dataset.id;
   const point = clientToSvg(event.clientX, event.clientY);
-  activeDrag = { source, pointerId: event.pointerId, start: projectedCenters[source], current: point, points: [projectedCenters[source], point], moved: false };
+  const batch = !event.ctrlKey && state.selectedSourceIds.has(source);
+  const sources = batch
+    ? [...state.selectedSourceIds].filter((id) => state.territories[id]?.owner === state.playerFaction)
+    : [source];
+  activeDrag = { source, sources, batch, toggleSelection: event.ctrlKey, pointerId: event.pointerId, start: projectedCenters[source], current: point, points: [projectedCenters[source], point], moved: false };
   dom.map.setPointerCapture(event.pointerId);
-  if (state.territories[source].troops > 1) reachableTargets(source, state.orderMode).forEach((id) => document.querySelector(`.territory[data-id="${id}"]`)?.classList.add("is-valid-target"));
-  drawDragLine();
+  if (!event.ctrlKey) {
+    const validTargets = new Set(sources.flatMap((id) => state.territories[id].troops > 1 ? reachableTargets(id, state.orderMode) : []));
+    validTargets.forEach((id) => document.querySelector(`.territory[data-id="${id}"]`)?.classList.add("is-valid-target"));
+    drawDragLine();
+  }
   event.preventDefault();
 }
 
 function moveDrag(event) {
   if (!activeDrag || event.pointerId !== activeDrag.pointerId) return;
+  if (activeDrag.toggleSelection) return;
   activeDrag.current = clientToSvg(event.clientX, event.clientY);
   const previous = activeDrag.points[activeDrag.points.length - 1];
   if (Math.hypot(activeDrag.current[0] - previous[0], activeDrag.current[1] - previous[1]) > 3) activeDrag.points.push(activeDrag.current);
@@ -761,30 +780,71 @@ function moveDrag(event) {
 
 function finishDrag(event) {
   if (!activeDrag || event.pointerId !== activeDrag.pointerId) return;
-  const source = activeDrag.source;
+  const currentDrag = activeDrag;
+  const source = currentDrag.source;
   const elements = document.elementsFromPoint(event.clientX, event.clientY);
   const targetNode = elements.map((element) => element.closest?.(".territory, .army-node")).find(Boolean);
   const target = targetNode?.dataset.id;
   clearDragHighlights();
   state.selectedTerritoryId = source;
-  if (!activeDrag.moved || !target || target === source) {
+  if (currentDrag.toggleSelection) {
+    if (state.selectedSourceIds.has(source)) state.selectedSourceIds.delete(source);
+    else state.selectedSourceIds.add(source);
+    state.selectedOrderKey = null;
+    state.notice = state.selectedSourceIds.size
+      ? `已多选 ${state.selectedSourceIds.size} 座城市；从任一已选圆圈划线即可统一调动全部可用兵力。`
+      : "已清除多选兵力。";
+    render();
+  } else if (!currentDrag.moved || !target || target === source) {
+    state.selectedSourceIds.clear();
     state.selectedOrderKey = null;
     state.notice = null;
     render();
+  } else if (currentDrag.batch) {
+    let staged = 0;
+    let skipped = 0;
+    for (const batchSource of currentDrag.sources) {
+      if (batchSource === target || !reachableTargets(batchSource, state.orderMode).includes(target)) {
+        skipped += 1;
+        continue;
+      }
+      const path = state.orderMode === "land" ? fitLandRoute(batchSource, target, currentDrag.points) : [batchSource, target];
+      if (state.orderMode === "land" && !path) {
+        skipped += 1;
+        continue;
+      }
+      const key = orderKey(batchSource, target);
+      const available = state.territories[batchSource].troops - 1 - committedTroops(batchSource, key);
+      if (available < 1) {
+        skipped += 1;
+        continue;
+      }
+      const routePoints = batchSource === source
+        ? fitDrawnRoute(batchSource, target, currentDrag.points)
+        : path.map((id) => projectedCenters[id]);
+      if (stageOrder(batchSource, target, state.orderMode, path, available, routePoints, false)) staged += 1;
+      else skipped += 1;
+    }
+    state.selectedOrderKey = null;
+    state.notice = staged
+      ? `已从 ${staged} 座城市向${TERRITORIES[target].shortName}统一调动全部可用兵力${skipped ? `；${skipped} 座城市因距离、路线或兵力限制被跳过` : ""}。`
+      : `没有城市能够到达${TERRITORIES[target].shortName}；跨越己方城市的陆路最远 ${LAND_RELAY_RANGE_KM} 公里。`;
+    render();
   } else {
-    const path = state.orderMode === "land" ? fitLandRoute(source, target, activeDrag.points) : [source, target];
-    const routePoints = fitDrawnRoute(source, target, activeDrag.points);
+    state.selectedSourceIds.clear();
+    const path = state.orderMode === "land" ? fitLandRoute(source, target, currentDrag.points) : [source, target];
+    const routePoints = fitDrawnRoute(source, target, currentDrag.points);
     stageOrder(source, target, state.orderMode, path, null, routePoints);
   }
   activeDrag = null;
   dom.dragLayer.innerHTML = "";
 }
 
-function stageOrder(source, target, mode = "land", path = null, requestedAmount = null, routePoints = null) {
+function stageOrder(source, target, mode = "land", path = null, requestedAmount = null, routePoints = null, renderResult = true) {
   if (!reachableTargets(source, mode).includes(target) || (mode === "land" && !path)) {
     state.notice = mode === "land" ? "陆路只能经过一座己方中间城市，且终点必须与路线相连。" : mode === "air" ? `该目标超出 ${AIR_RANGE_KM} 公里空降范围，或起点没有机场。` : "登陆必须从己方港口出发，目标必须是敌方沿海城市。";
     state.selectedOrderKey = null;
-    render();
+    if (renderResult) render();
     return false;
   }
   const key = orderKey(source, target);
@@ -793,14 +853,14 @@ function stageOrder(source, target, mode = "land", path = null, requestedAmount 
   if (!current && existingRoutes.length >= 2) {
     state.notice = "每个据点最多同时派出两路部队，请先取消一条命令。";
     state.selectedOrderKey = existingRoutes[0]?.[0] ?? null;
-    render();
+    if (renderResult) render();
     return false;
   }
   const remaining = state.territories[source].troops - 1 - committedTroops(source, key);
   if (remaining < 1) {
     state.notice = "该据点的可用兵力已全部分配，两路合计必须留下 1 名守军。";
     state.selectedOrderKey = existingRoutes[0]?.[0] ?? null;
-    render();
+    if (renderResult) render();
     return false;
   }
   const amount = requestedAmount ?? current?.amount ?? Math.max(1, Math.floor(remaining / 2));
@@ -808,7 +868,7 @@ function stageOrder(source, target, mode = "land", path = null, requestedAmount 
   state.selectedOrderKey = key;
   state.selectedTerritoryId = source;
   state.notice = null;
-  render();
+  if (renderResult) render();
   return true;
 }
 
@@ -892,6 +952,7 @@ function finishPan(event) {
   activePan = null;
   dom.map.classList.remove("is-panning");
   if (clickedTerritory && state?.phase === "planning") {
+    state.selectedSourceIds.clear();
     state.selectedTerritoryId = clickedTerritory;
     state.selectedOrderKey = null;
     state.notice = state.territories[clickedTerritory].owner === state.playerFaction ? null : `${TERRITORIES[clickedTerritory].name}由${FACTIONS[state.territories[clickedTerritory].owner].name}控制。`;
@@ -922,7 +983,10 @@ function generateNpcOrders(snapshot, round) {
       for (const targetId of territoryAdjacency[sourceId]) {
         if (snapshot[targetId].owner !== factionId) landOptions.set(targetId, [sourceId, targetId]);
         if (snapshot[targetId].owner === factionId) {
-          for (const second of territoryAdjacency[targetId]) if (second !== sourceId && snapshot[second].owner !== factionId && !landOptions.has(second)) landOptions.set(second, [sourceId, targetId, second]);
+          for (const second of territoryAdjacency[targetId]) if (second !== sourceId
+            && snapshot[second].owner !== factionId
+            && haversineKm(TERRITORIES[sourceId].label, TERRITORIES[second].label) <= LAND_RELAY_RANGE_KM
+            && !landOptions.has(second)) landOptions.set(second, [sourceId, targetId, second]);
         }
       }
       const hostile = [...landOptions.entries()]
@@ -1114,6 +1178,7 @@ async function endTurn(playbackMode = "overview") {
   const { report, contested } = resolveBattles(roundOrders);
   state.playerOrders.clear();
   state.selectedOrderKey = null;
+  state.selectedSourceIds = new Set();
   state.phase = "battle";
   state.flashIds = contested;
   render();
@@ -1392,6 +1457,7 @@ function rollbackTurn() {
   state.selectedTerritoryId = state.territories[FACTIONS[state.playerFaction].start]?.owner === state.playerFaction
     ? FACTIONS[state.playerFaction].start
     : TERRITORY_IDS.find((id) => state.territories[id].owner === state.playerFaction) ?? null;
+  state.selectedSourceIds = new Set();
   state.notice = `已回到第 ${snapshot.round} 回合开始时；NPC 仍使用当时已锁定的命令。`;
   state.flashIds.clear();
   state.gameOver = false;
@@ -1433,7 +1499,7 @@ function registerWebMcpTools() {
     execute() { const encircled = getEncircledTerritories(); return { mode: state.mode, playerFaction: state.playerFaction, round: state.round, phase: state.phase, historyDepth: state.history.length, ranking: activeFactionIds().map((id) => ({ faction: id, ...getFactionStrength(id) })).sort((a, b) => b.future - a.future || b.current - a.current), territories: Object.fromEntries(Object.entries(state.territories).map(([id, item]) => [id, { name: TERRITORIES[id].name, mountainRanges: TERRITORIES[id].mountainRanges, coastal: COASTAL_TERRITORIES.has(id), encircled: encircled.has(id), ...item }])), fleets: state.fleets, playerOrders: [...state.playerOrders.values()] }; },
   });
   register({
-    name: "stage_territory_order", title: "部署领地命令", description: "部署最多跨一座己方城市的陆路、700公里空降或沿海登陆命令。",
+    name: "stage_territory_order", title: "部署领地命令", description: `部署相邻陆路、最远 ${LAND_RELAY_RANGE_KM} 公里的跨城陆路、${AIR_RANGE_KM} 公里空降或沿海登陆命令。`,
     inputSchema: { type: "object", properties: { source: { type: "string", enum: TERRITORY_IDS }, target: { type: "string", enum: TERRITORY_IDS }, amount: { type: "integer", minimum: 1, maximum: 44 }, mode: { type: "string", enum: ["land", "air", "sea"] } }, required: ["source", "target", "amount"], additionalProperties: false },
     annotations: { readOnlyHint: false, untrustedContentHint: false },
     execute(input) {

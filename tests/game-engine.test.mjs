@@ -4,7 +4,9 @@ import {
   createGameState, endPlayerTurn, pauseGame, resumeGameIfReady, stageOrder, startConstruction,
 } from "../server/game-engine.js";
 import { TERRITORY_ADJACENCY } from "../server/game-data.js";
-import { EIGHT_FACTION_IDS, EIGHT_TERRITORY_GROUPS, FACTION_IDS } from "../dist/modules/config.js";
+import {
+  AIR_RANGE_KM, EIGHT_FACTION_IDS, EIGHT_TERRITORY_GROUPS, FACTION_IDS, LAND_RELAY_RANGE_KM,
+} from "../dist/modules/config.js";
 
 function roomFixture(count = 2, settings = undefined) {
   const factions = ["zhu_di", "li_shimin", "cao_cao", "nurhaci"];
@@ -58,6 +60,35 @@ test("天险开关阻断普通跨山路线并保留重镇关口", () => {
   assert.throws(() => stageOrder(game, "p1", { source: "110000", target: "130800", amount: 3, path: ["110000", "130800"] }), /燕山阻断/);
   const gateOrder = stageOrder(game, "p1", { source: "110000", target: "130700", amount: 3, path: ["110000", "130700"] });
   assert.deepEqual(gateOrder.path, ["110000", "130700"]);
+});
+
+test("跨越己方城市的陆路限制为 300 公里，相邻城市不受里程限制", () => {
+  assert.equal(LAND_RELAY_RANGE_KM, 300);
+  const game = createGameState(roomFixture(2));
+  game.territories["140100"].owner = "zhu_di";
+  game.territories["140100"].troops = 15;
+  game.territories["140900"].owner = "zhu_di";
+  game.territories["140900"].troops = 15;
+  assert.throws(
+    () => stageOrder(game, "p1", { source: "140100", target: "150100", amount: 3, path: ["140100", "140900", "150100"] }),
+    /最远 300 公里/,
+  );
+  const adjacent = stageOrder(game, "p1", { source: "140900", target: "150600", amount: 3, path: ["140900", "150600"] });
+  assert.deepEqual(adjacent.path, ["140900", "150600"], "相邻城市即使直线距离超过 300 公里也允许调遣");
+});
+
+test("机场空降范围提高到 1200 公里", () => {
+  assert.equal(AIR_RANGE_KM, 1200);
+  const game = createGameState(roomFixture(2));
+  game.territories["110000"].airport = true;
+  assert.equal(stageOrder(game, "p1", { source: "110000", target: "211200", amount: 3, mode: "air" }).mode, "air", "原 700 公里外目标现在可空降");
+  game.territories["150700"].owner = "zhu_di";
+  game.territories["150700"].troops = 15;
+  game.territories["150700"].airport = true;
+  assert.throws(
+    () => stageOrder(game, "p1", { source: "150700", target: "411500", amount: 3, mode: "air" }),
+    /超出 1200 公里/,
+  );
 });
 
 test("所有真人可同时部署，服务端仍限制各自出征预算", () => {

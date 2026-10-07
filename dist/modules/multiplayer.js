@@ -1,5 +1,5 @@
 import {
-  COASTAL_TERRITORIES, FACTIONS, GROWTH_PER_TERRITORY, METROPOLIS_MAX_TROOPS,
+  COASTAL_TERRITORIES, FACTIONS, GROWTH_PER_TERRITORY, LAND_RELAY_RANGE_KM, METROPOLIS_MAX_TROOPS,
   MAX_AIRPORTS_PER_FACTION, MAX_TROOPS, MILITARY_STRONGHOLDS, MULTIPLAYER_GAME_MODES,
 } from "./config.js";
 import { getGameDom } from "./dom.js";
@@ -57,6 +57,7 @@ export async function startMultiplayerApp({ entryDialog, lobbyDialog }) {
   let orderMode = "land";
   let selectedTerritoryId = null;
   let selectedOrderId = null;
+  let selectedSourceIds = [];
   let lastAnimatedRound = 0;
   let startingGame = false;
   let resumeInFlight = false;
@@ -279,7 +280,11 @@ export async function startMultiplayerApp({ entryDialog, lobbyDialog }) {
     const airportCount = Object.values(gameState.territories).filter((item) => item.owner === player.factionId && (item.airport || item.construction?.type === "airport")).length
       + (gameState.pendingConstructions ?? []).filter((order) => order.owner === player.factionId && order.type === "airport").length;
     const canBuildAirport = canBuild && !territory.airport && airportCount < MAX_AIRPORTS_PER_FACTION;
-    dom.summary.innerHTML = `<span class="eyebrow">城市状态</span><h2>${mapController.definitions[selectedTerritoryId].name} · ${territory.troops}/${territory.metropolis ? METROPOLIS_MAX_TROOPS : MAX_TROOPS} 兵</h2><div class="territory-meta"><span>${FACTIONS[territory.owner]?.name ?? "中立"}</span>${territory.capitalOf ? "<span>首都</span>" : ""}${stronghold ? `<span>军事重镇 · ${stronghold.role}</span>` : ""}${territory.airport ? "<span>机场</span>" : ""}${territory.port ? "<span>港口</span>" : ""}${territory.construction ? `<span>建设剩余 ${territory.construction.remaining} 回合</span>` : ""}${queuedConstruction ? `<span>${queuedConstruction.type === "airport" ? "机场" : "港口"}待提交</span>` : ""}</div><p>${stronghold ? "军事重镇防御提高 25%；山脉阻隔线只能经指定关口通行。" : isOwn ? `拖动兵力圆标下达命令；本势力机场 ${airportCount}/${MAX_AIRPORTS_PER_FACTION}。` : "敌方或中立城市，只能作为合法进攻目标。"}</p>${queuedConstruction ? `<div class="build-actions"><button type="button" data-cancel-construction="${queuedConstruction.id}" ${canAct() ? "" : "disabled"}>取消待提交建设</button></div>` : isOwn ? `<div class="build-actions"><button type="button" data-build="airport" ${canBuildAirport ? "" : "disabled"}>${territory.airport ? "机场已建成" : airportCount >= MAX_AIRPORTS_PER_FACTION ? `机场已达上限 ${MAX_AIRPORTS_PER_FACTION}` : "修建机场 · 8回合"}</button><button type="button" data-build="port" ${canBuild && coastal && !territory.port ? "" : "disabled"}>${territory.port ? "港口已建成" : coastal ? "修建港口 · 8回合" : "非沿海城市"}</button></div>` : ""}`;
+    const selectedSources = selectedSourceIds.filter((id) => gameState.territories[id]?.owner === player.factionId);
+    const multiSelectNotice = selectedSources.length
+      ? `<p class="command-notice">已多选 ${selectedSources.length} 座城市。拖动任一已选圆圈，将从每城派出全部可用兵力；超过 ${LAND_RELAY_RANGE_KM} 公里的跨城路线会跳过。</p>`
+      : "";
+    dom.summary.innerHTML = `<span class="eyebrow">城市状态</span><h2>${mapController.definitions[selectedTerritoryId].name} · ${territory.troops}/${territory.metropolis ? METROPOLIS_MAX_TROOPS : MAX_TROOPS} 兵</h2><div class="territory-meta"><span>${FACTIONS[territory.owner]?.name ?? "中立"}</span>${territory.capitalOf ? "<span>首都</span>" : ""}${stronghold ? `<span>军事重镇 · ${stronghold.role}</span>` : ""}${territory.airport ? "<span>机场</span>" : ""}${territory.port ? "<span>港口</span>" : ""}${territory.construction ? `<span>建设剩余 ${territory.construction.remaining} 回合</span>` : ""}${queuedConstruction ? `<span>${queuedConstruction.type === "airport" ? "机场" : "港口"}待提交</span>` : ""}</div><p>${stronghold ? "军事重镇防御提高 25%；山脉阻隔线只能经指定关口通行。" : isOwn ? `拖动兵力圆标下达命令；本势力机场 ${airportCount}/${MAX_AIRPORTS_PER_FACTION}。` : "敌方或中立城市，只能作为合法进攻目标。"}</p>${multiSelectNotice}${queuedConstruction ? `<div class="build-actions"><button type="button" data-cancel-construction="${queuedConstruction.id}" ${canAct() ? "" : "disabled"}>取消待提交建设</button></div>` : isOwn ? `<div class="build-actions"><button type="button" data-build="airport" ${canBuildAirport ? "" : "disabled"}>${territory.airport ? "机场已建成" : airportCount >= MAX_AIRPORTS_PER_FACTION ? `机场已达上限 ${MAX_AIRPORTS_PER_FACTION}` : "修建机场 · 8回合"}</button><button type="button" data-build="port" ${canBuild && coastal && !territory.port ? "" : "disabled"}>${territory.port ? "港口已建成" : coastal ? "修建港口 · 8回合" : "非沿海城市"}</button></div>` : ""}`;
   }
 
   async function showResolution(resolution) {
@@ -297,15 +302,23 @@ export async function startMultiplayerApp({ entryDialog, lobbyDialog }) {
       mapPromise = createMultiplayerMap({
         dom,
         getContext: context,
-        onSelectTerritory(id) {
+        onSelectTerritory(id, selection = {}) {
           selectedTerritoryId = id;
           selectedOrderId = null;
+          selectedSourceIds = selection.selectedIds ?? [];
           renderGame();
         },
-        onDrawOrder(payload) {
-          selectedTerritoryId = payload.source;
-          selectedOrderId = `${payload.source}:${payload.target}:${payload.mode}`;
-          action(() => network.request("stageOrder", payload));
+        async onDrawOrder(payloads, metadata = {}) {
+          if (!payloads.length) {
+            showError(new Error(`所选城市均无法到达目标；跨越己方城市的陆路最远 ${LAND_RELAY_RANGE_KM} 公里。`));
+            return;
+          }
+          selectedTerritoryId = payloads[0].source;
+          selectedOrderId = metadata.batch ? null : `${payloads[0].source}:${payloads[0].target}:${payloads[0].mode}`;
+          await action(async () => {
+            for (const payload of payloads) await network.request("stageOrder", payload);
+            if (metadata.batch && metadata.skipped) showError(new Error(`已部署 ${payloads.length} 座城市；另有 ${metadata.skipped} 座因距离、路线或兵力限制被跳过。`));
+          });
         },
       }).then((controller) => {
         mapController = controller;

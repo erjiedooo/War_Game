@@ -1,6 +1,6 @@
 import {
   AIR_RANGE_KM, COASTAL_TERRITORIES, FACTIONS, MAP_SIZE, MILITARY_STRONGHOLDS,
-  MIN_VIEW_SIZE, mountainBarrierForEdge, STRATEGIC_MOUNTAIN_LINES,
+  MIN_VIEW_SIZE, mountainBarrierForEdge, STRATEGIC_MOUNTAIN_LINES, LAND_RELAY_RANGE_KM,
 } from "./config.js";
 import {
   createProjection, distancePointToSegment, geometryToPath, getBounds, haversineKm, simplifyRoute,
@@ -24,6 +24,7 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
   let drag = null;
   let pan = null;
   let selectedId = null;
+  const selectedIds = new Set();
 
   dom.territoryLayer.innerHTML = ids.map((id) => `<g class="territory" data-id="${id}" tabindex="0" role="button" aria-label="${definitions[id].name}">
     <path class="territory-shape" d="${geometryToPath(features.get(id).geometry, projection)}" fill-rule="evenodd" />
@@ -114,16 +115,22 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
     if (!army || !canActFrom(army.dataset.id)) return;
     const source = army.dataset.id;
     const point = clientToSvg(event.clientX, event.clientY);
-    drag = { source, pointerId: event.pointerId, start: centers[source], current: point, points: [centers[source], point], moved: false };
+    const batch = !event.ctrlKey && selectedIds.has(source);
+    if (!batch && !event.ctrlKey) selectedIds.clear();
+    const sources = batch ? [...selectedIds].filter(canActFrom) : [source];
+    drag = { source, sources, batch, toggleSelection: event.ctrlKey, pointerId: event.pointerId, start: centers[source], current: point, points: [centers[source], point], moved: false };
     dom.map.setPointerCapture(event.pointerId);
-    const validTargets = new Set(reachableTargets(source));
-    dom.territoryLayer.querySelectorAll(".territory").forEach((node) => node.classList.toggle("is-valid-target", validTargets.has(node.dataset.id)));
-    drawDrag();
+    if (!event.ctrlKey) {
+      const validTargets = new Set(sources.flatMap(reachableTargets));
+      dom.territoryLayer.querySelectorAll(".territory").forEach((node) => node.classList.toggle("is-valid-target", validTargets.has(node.dataset.id)));
+      drawDrag();
+    }
     event.preventDefault();
   }
 
   function moveDrag(event) {
     if (!drag || event.pointerId !== drag.pointerId) return;
+    if (drag.toggleSelection) return;
     drag.current = clientToSvg(event.clientX, event.clientY);
     const previous = drag.points.at(-1);
     if (Math.hypot(drag.current[0] - previous[0], drag.current[1] - previous[1]) > 3) drag.points.push(drag.current);
@@ -139,23 +146,53 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
     dom.territoryLayer.querySelectorAll(".territory.is-valid-target").forEach((node) => node.classList.remove("is-valid-target"));
     const target = document.elementsFromPoint(event.clientX, event.clientY).map((element) => element.closest?.(".territory, .army-node")).find(Boolean)?.dataset.id;
     selectedId = currentDrag.source;
-    onSelectTerritory(currentDrag.source);
+    if (currentDrag.toggleSelection) {
+      if (selectedIds.has(currentDrag.source)) selectedIds.delete(currentDrag.source);
+      else selectedIds.add(currentDrag.source);
+      onSelectTerritory(currentDrag.source, { selectedIds: [...selectedIds], toggled: true });
+      return;
+    }
+    onSelectTerritory(currentDrag.source, { selectedIds: [...selectedIds] });
     if (!currentDrag.moved || !target || target === currentDrag.source) return;
     const { gameState, orderMode } = getContext();
-    const routePoints = fitDrawnRoute(currentDrag.source, target, currentDrag.points);
-    const path = orderMode === "land" ? fitLandRoute(currentDrag.source, target, currentDrag.points, gameState) : [currentDrag.source, target];
-    const orderId = `${currentDrag.source}:${target}:${orderMode}`;
-    const committed = gameState.pendingOrders.filter((order) => order.source === currentDrag.source && order.id !== orderId).reduce((sum, order) => sum + order.amount, 0);
-    const available = gameState.territories[currentDrag.source].troops - 1 - committed;
-    if (available < 1) return;
-    onDrawOrder({
-      source: currentDrag.source,
-      target,
-      mode: orderMode,
-      amount: Math.max(1, Math.floor(available / 2)),
-      path,
-      routeGeo: routePoints.map((point) => projection.inverse(point)),
-    });
+    const payloads = [];
+    let skipped = 0;
+    for (const source of currentDrag.sources) {
+      if (source === target || !reachableTargets(source).includes(target)) {
+        skipped += 1;
+        continue;
+      }
+      const path = orderMode === "land" ? fitLandRoute(source, target, currentDrag.points, gameState) : [source, target];
+      if (!path) {
+        skipped += 1;
+        continue;
+      }
+      const orderId = `${source}:${target}:${orderMode}`;
+      const sourceOrders = gameState.pendingOrders.filter((order) => order.source === source);
+      const currentOrder = sourceOrders.find((order) => order.id === orderId);
+      if (!currentOrder && sourceOrders.length >= 2) {
+        skipped += 1;
+        continue;
+      }
+      const committed = gameState.pendingOrders.filter((order) => order.source === source && order.id !== orderId).reduce((sum, order) => sum + order.amount, 0);
+      const available = gameState.territories[source].troops - 1 - committed;
+      if (available < 1) {
+        skipped += 1;
+        continue;
+      }
+      const routePoints = source === currentDrag.source
+        ? fitDrawnRoute(source, target, currentDrag.points)
+        : path.map((id) => centers[id]);
+      payloads.push({
+        source,
+        target,
+        mode: orderMode,
+        amount: currentDrag.batch ? available : Math.max(1, Math.floor(available / 2)),
+        path,
+        routeGeo: routePoints.map((point) => projection.inverse(point)),
+      });
+    }
+    void onDrawOrder(payloads, { batch: currentDrag.batch, skipped, target });
   }
 
   function reachableTargets(source) {
@@ -174,7 +211,9 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
     const targets = new Set((adjacency[source] ?? []).filter((target) => passable(source, target)));
     for (const middle of adjacency[source] ?? []) {
       if (gameState.territories[middle]?.owner !== sourceTerritory.owner || !passable(source, middle)) continue;
-      for (const target of adjacency[middle] ?? []) if (target !== source && passable(middle, target)) targets.add(target);
+      for (const target of adjacency[middle] ?? []) if (target !== source
+        && passable(middle, target)
+        && haversineKm(definitions[source].label, definitions[target].label) <= LAND_RELAY_RANGE_KM) targets.add(target);
     }
     return [...targets];
   }
@@ -207,8 +246,9 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
     pan = null;
     dom.map.classList.remove("is-panning");
     if (clicked) {
+      selectedIds.clear();
       selectedId = clicked;
-      onSelectTerritory(clicked);
+      onSelectTerritory(clicked, { selectedIds: [] });
     }
   }
 
@@ -216,10 +256,10 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
     const candidates = [];
     const passable = (a, b) => !gameState.settings?.strategicTerrain || !mountainBarrierForEdge(a, b);
     if (adjacency[source]?.includes(target) && passable(source, target)) candidates.push([source, target]);
-    for (const middle of adjacency[source] ?? []) {
+    if (haversineKm(definitions[source].label, definitions[target].label) <= LAND_RELAY_RANGE_KM) for (const middle of adjacency[source] ?? []) {
       if (gameState.territories[middle]?.owner === gameState.territories[source]?.owner && adjacency[middle]?.includes(target) && passable(source, middle) && passable(middle, target)) candidates.push([source, middle, target]);
     }
-    if (!candidates.length) return [source, target];
+    if (!candidates.length) return null;
     return candidates.sort((a, b) => strokeDistance(stroke, a) - strokeDistance(stroke, b))[0];
   }
 
@@ -263,6 +303,7 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
 
   function render(gameState, roomState) {
     const viewer = gameState.players.find((player) => player.id === roomState.viewerPlayerId);
+    for (const id of [...selectedIds]) if (gameState.territories[id]?.owner !== viewer?.factionId) selectedIds.delete(id);
     const strategicTerrain = Boolean(gameState.settings?.strategicTerrain);
     dom.map.classList.toggle("strategic-terrain-enabled", strategicTerrain);
     document.querySelectorAll(".territory").forEach((node) => {
@@ -270,6 +311,7 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
       const territory = gameState.territories[id];
       node.style.setProperty("--owner-color", FACTIONS[territory.owner]?.color ?? FACTIONS.neutral.color);
       node.classList.toggle("is-selected", id === selectedId);
+      node.classList.toggle("is-multi-selected", selectedIds.has(id));
       node.setAttribute("aria-label", `${definitions[id].name}${strategicTerrain && MILITARY_STRONGHOLDS[id] ? `，军事重镇，${MILITARY_STRONGHOLDS[id].role}` : ""}，${FACTIONS[territory.owner]?.name ?? "中立"}，${territory.troops}兵`);
     });
     document.querySelectorAll(".map-label").forEach((node) => {
@@ -279,6 +321,7 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
       node.classList.toggle("is-stronghold", strategicTerrain && Boolean(MILITARY_STRONGHOLDS[id]));
       const army = node.querySelector(".army-node");
       army.classList.toggle("is-player", territory.owner === viewer?.factionId);
+      army.classList.toggle("is-multi-selected", selectedIds.has(id));
       army.querySelector("text").textContent = territory.troops;
       army.setAttribute("aria-label", `${definitions[id].name}兵力${territory.troops}`);
       node.querySelector(".status-icons").textContent = [strategicTerrain && MILITARY_STRONGHOLDS[id] ? "♜" : "", territory.capitalOf ? "◆" : "", territory.metropolis ? "★" : "", territory.airport ? "✈" : "", territory.port ? "⚓" : "", territory.construction ? "⌛" : ""].filter(Boolean).join("");
@@ -326,7 +369,12 @@ export async function createMultiplayerMap({ dom, getContext, onDrawOrder, onSel
   dom.zoomOut.addEventListener("click", () => zoom(1.38));
   dom.zoomReset.addEventListener("click", () => setView({ x: 0, y: 0, width: MAP_SIZE, height: MAP_SIZE }));
 
-  return { definitions, ids, adjacency, render, playResolution, setSelected(id) { selectedId = id; }, getSelected() { return selectedId; } };
+  return {
+    definitions, ids, adjacency, render, playResolution,
+    setSelected(id) { selectedId = id; },
+    getSelected() { return selectedId; },
+    getSelectedSources() { return [...selectedIds]; },
+  };
 }
 
 function deriveAdjacency(ids, features) {

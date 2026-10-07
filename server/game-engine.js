@@ -4,6 +4,7 @@ import {
   ENCIRCLED_DEFENSE_MULTIPLIER, FACTIONS, FACTION_IDS,
   GROWTH_PER_TERRITORY, LANDING_ATTRITION_RATE, MAX_TROOPS, METROPOLIS_DEFENSE_MULTIPLIER,
   METROPOLIS_MAX_TROOPS, MILITARY_STRONGHOLDS, MOUNTAIN_ATTRITION_RATE, MAX_AIRPORTS_PER_FACTION,
+  LAND_RELAY_RANGE_KM,
   MOUNTAIN_DEFENSE_MULTIPLIER, mountainBarrierForEdge, NEUTRAL, RIVER_ATTRITION_RATE,
   STRONGHOLD_DEFENSE_MULTIPLIER,
 } from "../dist/modules/config.js";
@@ -273,6 +274,7 @@ function partitionTerritories(factionIds) {
 function defaultLandPath(game, source, target) {
   const passable = (a, b) => !game.settings?.strategicTerrain || !mountainBarrierForEdge(a, b);
   if (TERRITORY_ADJACENCY[source]?.includes(target) && passable(source, target)) return [source, target];
+  if (haversineKm(TERRITORY_DEFINITIONS[source].label, TERRITORY_DEFINITIONS[target].label) > LAND_RELAY_RANGE_KM) return null;
   const middle = TERRITORY_ADJACENCY[source]?.find((id) => game.territories[id].owner === game.territories[source].owner && TERRITORY_ADJACENCY[id]?.includes(target) && passable(source, id) && passable(id, target));
   return middle ? [source, middle, target] : null;
 }
@@ -286,7 +288,10 @@ function validateLandPath(game, source, target, proposedPath) {
     const barrier = game.settings?.strategicTerrain ? mountainBarrierForEdge(path[index - 1], path[index]) : null;
     requireRule(!barrier, `${barrier}阻断该陆路，请改走军事重镇或使用空降。`, "MOUNTAIN_BLOCKED");
   }
-  if (path.length === 3) requireRule(game.territories[path[1]]?.owner === game.territories[source].owner, "中间城市必须属于同一势力。", "INVALID_ROUTE");
+  if (path.length === 3) {
+    requireRule(game.territories[path[1]]?.owner === game.territories[source].owner, "中间城市必须属于同一势力。", "INVALID_ROUTE");
+    requireRule(haversineKm(TERRITORY_DEFINITIONS[source].label, TERRITORY_DEFINITIONS[target].label) <= LAND_RELAY_RANGE_KM, `跨城陆路调遣最远 ${LAND_RELAY_RANGE_KM} 公里；相邻城市不受此限制。`, "OUT_OF_RANGE");
+  }
   return path;
 }
 
@@ -346,7 +351,7 @@ export function stageOrder(game, playerId, payload = {}) {
   if (mode === "land") path = validateLandPath(game, source, target, payload.path);
   if (mode === "air") {
     requireRule(game.territories[source].airport, "起点城市没有机场。", "AIRPORT_REQUIRED");
-    requireRule(haversineKm(TERRITORY_DEFINITIONS[source].label, TERRITORY_DEFINITIONS[target].label) <= AIR_RANGE_KM, "目标超出 700 公里空降范围。", "OUT_OF_RANGE");
+    requireRule(haversineKm(TERRITORY_DEFINITIONS[source].label, TERRITORY_DEFINITIONS[target].label) <= AIR_RANGE_KM, `目标超出 ${AIR_RANGE_KM} 公里空降范围。`, "OUT_OF_RANGE");
     path = [source, target];
   }
   if (mode === "sea") {
