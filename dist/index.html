@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="War_Game：基于北方八省区市真实行政区划边界的同步回合制领地战略游戏。" />
+    <title>War_Game</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%230b1719'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial' font-weight='700' font-size='17' fill='%23e6b85c'%3EWG%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="game-shell">
+      <header class="topbar">
+        <div class="wordmark" aria-label="War Game">
+          <h1>War_Game</h1>
+          <span>名称已定 · 标志待定</span>
+        </div>
+        <div class="round-card">
+          <span>当前回合</span>
+          <strong id="round-number">--</strong>
+          <small id="phase-label">选择势力</small>
+        </div>
+        <div class="header-actions">
+          <div class="latency-status" id="latency-status" hidden><span>延迟</span><strong>-- ms</strong></div>
+          <button class="rollback-button" id="rollback-turn" type="button" disabled>回到上一回合</button>
+          <button class="rules-button" id="pause-game" type="button" hidden>暂停游戏</button>
+          <button class="rules-button" id="rules-button" type="button">作战规则</button>
+        </div>
+      </header>
+
+      <section class="scoreboard" id="scoreboard" aria-label="势力概况"></section>
+
+      <div class="battle-layout">
+        <section class="map-panel" aria-label="北方大战区真实行政区划战场">
+          <div class="map-heading">
+            <div>
+              <span class="eyebrow">北方大战区 · 84 领地</span>
+              <h2 id="map-instruction">自由划线，路线将拟合到城市与交通节点</h2>
+            </div>
+            <div class="legend" id="legend" aria-label="势力图例"></div>
+          </div>
+
+          <div class="map-wrap" id="map-wrap">
+            <div class="map-loading" id="map-loading">正在载入官方行政区划边界…</div>
+            <svg class="war-map" id="war-map" viewBox="0 0 760 760" role="img" aria-labelledby="map-title map-desc">
+              <title id="map-title">北方大战区八十四领地战略地图</title>
+              <desc id="map-desc">地图覆盖北京、天津、河北、山西、内蒙古、辽宁、山东与河南，基于天地图2024行政区划公开数据绘制。</desc>
+              <defs>
+                <pattern id="map-grid" width="30" height="30" patternUnits="userSpaceOnUse">
+                  <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(221,229,214,.05)" stroke-width="1" />
+                </pattern>
+                <filter id="territory-shadow" x="-20%" y="-20%" width="140%" height="140%">
+                  <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#000" flood-opacity=".3" />
+                </filter>
+                <clipPath id="battlefield-clip"></clipPath>
+                <marker id="order-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
+                </marker>
+              </defs>
+              <rect class="map-backdrop" x="6" y="6" width="748" height="748" rx="22" />
+              <rect x="6" y="6" width="748" height="748" rx="22" fill="url(#map-grid)" />
+              <g id="territory-layer"></g>
+              <g id="mountain-layer" aria-label="现实山脉" clip-path="url(#battlefield-clip)"></g>
+              <g id="river-layer" aria-label="现实河道" clip-path="url(#battlefield-clip)"></g>
+              <g id="fleet-layer" aria-label="海上舰队"></g>
+              <g id="order-lines" aria-hidden="true"></g>
+              <g id="battle-animation-layer" aria-hidden="true"></g>
+              <g id="drag-layer" aria-hidden="true"></g>
+              <g id="label-layer"></g>
+            </svg>
+            <div class="map-controls" aria-label="地图缩放">
+              <button id="zoom-in" type="button" aria-label="放大地图">＋</button>
+              <button id="zoom-out" type="button" aria-label="缩小地图">−</button>
+              <button id="zoom-reset" type="button">全图</button>
+            </div>
+            <div class="playback-status" id="playback-status" aria-live="polite" hidden></div>
+            <div class="map-attribution">
+              边界数据：国家地理信息公共服务平台·天地图 2024<br />
+              审图号 GS(2024)0650号 · 水系：Natural Earth 1:10m · 地形：战略示意廊带
+            </div>
+          </div>
+        </section>
+
+        <aside class="command-panel" aria-label="部署面板">
+          <div class="order-mode-switch" id="order-mode-switch" aria-label="命令类型">
+            <button type="button" data-order-mode="land" class="is-active">陆路</button>
+            <button type="button" data-order-mode="air">空降</button>
+            <button type="button" data-order-mode="sea">登陆</button>
+          </div>
+          <div class="panel-section selection-summary" id="selection-summary">
+            <span class="eyebrow">部署方式</span>
+            <h2>拖动兵力，下达命令</h2>
+            <p>按住己方兵力圆标自由划线，可选择陆路、空降或登陆。</p>
+          </div>
+          <div class="panel-section order-rules">
+            <span>领地增长</span><strong>+3 / 回合</strong>
+            <span>驻军上限</span><strong>30</strong>
+            <span>特大城市上限</span><strong>45</strong>
+            <span>最低留守</span><strong>1</strong>
+          </div>
+          <div class="panel-section planned-orders">
+            <div class="section-title"><h3>部署队列</h3><span id="order-count">0 项</span></div>
+            <div id="order-list"><div class="empty-orders">拖动兵力标记来部署</div></div>
+          </div>
+          <button class="end-turn" id="end-turn" type="button" disabled>结束部署</button>
+          <p class="sync-note" id="sync-note">选择势力后开始第一回合。</p>
+        </aside>
+      </div>
+    </main>
+
+    <dialog class="game-dialog entry-dialog" id="entry-dialog">
+      <span class="eyebrow">War_Game · 运行模式</span>
+      <h2>选择作战方式</h2>
+      <p class="dialog-intro">单机模式保留 NPC 同步部署与回档；局域网模式支持 2–4 名玩家，由服务器统一判定战局。</p>
+      <div class="entry-options">
+        <button type="button" data-entry-mode="single"><b>单机作战</b><small>十雄逐鹿 / 八方割据 · NPC · 可回档</small></button>
+        <button type="button" data-entry-mode="multiplayer"><b>局域网联机</b><small>创建或加入房间 · 2–4 名玩家</small></button>
+      </div>
+    </dialog>
+
+    <dialog class="game-dialog lobby-dialog" id="lobby-dialog">
+      <div class="dialog-head"><span class="eyebrow">局域网作战大厅</span><button type="button" id="lobby-back" aria-label="返回">×</button></div>
+      <h2 id="lobby-title">创建或加入房间</h2>
+      <p class="dialog-intro" id="connection-status">正在连接本地服务器…</p>
+      <section id="lobby-entry" class="lobby-entry">
+        <label>玩家名称<input id="player-name" maxlength="20" autocomplete="nickname" placeholder="请输入名称" value="玩家" /></label>
+        <div class="lobby-actions">
+          <div class="lobby-action-card">
+            <b>创建房间</b>
+            <label>人数上限<select id="max-players"><option value="2">2 人</option><option value="3">3 人</option><option value="4" selected>4 人</option></select></label>
+            <label>地图模式<select id="multiplayer-game-mode"><option value="expansion">开拓模式 · 十雄与中立地区</option><option value="partition">割据模式 · 八方固定版图</option></select></label>
+            <label class="lobby-toggle"><input id="strategic-terrain" type="checkbox" />启用天险与军事重镇</label>
+            <button type="button" class="dialog-primary" id="create-room">创建</button>
+          </div>
+          <div class="lobby-action-card">
+            <b>加入房间</b>
+            <label>房间码<input id="room-code-input" maxlength="6" autocomplete="off" placeholder="例如 A1B2C3" /></label>
+            <button type="button" class="dialog-primary" id="join-room">加入</button>
+          </div>
+        </div>
+      </section>
+      <section id="room-panel" class="room-panel" hidden>
+        <div class="room-code-row"><span>房间码</span><strong id="room-code">------</strong><small id="room-capacity"></small></div>
+        <div class="room-settings-summary" id="room-settings-summary"></div>
+        <div class="room-players" id="room-players"></div>
+        <span class="eyebrow">选择势力</span>
+        <div class="lobby-factions" id="lobby-factions"></div>
+        <div class="lobby-footer">
+          <button type="button" class="dialog-secondary" id="ready-button">准备</button>
+          <button type="button" class="dialog-primary" id="start-room-game" hidden>开始游戏</button>
+        </div>
+      </section>
+      <p class="lobby-error" id="lobby-error" role="alert" hidden></p>
+    </dialog>
+
+    <dialog class="game-dialog faction-dialog" id="faction-dialog">
+      <span class="eyebrow">War_Game · 开局设置</span>
+      <h2>选择你的势力</h2>
+      <div class="mode-options" id="mode-options" aria-label="游戏模式">
+        <button type="button" class="is-active" data-game-mode="ten"><b>十雄逐鹿</b><small>十城起兵，其余中立</small></button>
+        <button type="button" data-game-mode="eight"><b>八方割据</b><small>八势力瓜分全图</small></button>
+      </div>
+      <p class="dialog-intro" id="faction-intro">十个势力各据一城，其余城市由中立守军控制。选择一名历史人物，其他势力由 NPC 控制。</p>
+      <div class="faction-options" id="faction-options"></div>
+    </dialog>
+
+    <dialog class="game-dialog" id="rules-dialog">
+      <div class="dialog-head"><span class="eyebrow">作战手册</span><button type="button" data-close-dialog aria-label="关闭">×</button></div>
+      <h2>同步回合规则</h2>
+      <ol>
+        <li>从己方兵力圆标自由划线，陆路可经过一座己方中间城市；可达性按城市拓扑判断，箭头和损耗严格按玩家笔迹平滑拟合。</li>
+        <li>每个据点每回合最多派出两路部队；两路合计后，起点至少留下 1 名守军。</li>
+        <li>多人模式中所有真人同时部署、分别提交；全部真人提交后 NPC 才生成命令，但只读取玩家部署前的回合初始局面，随后服务器统一结算。</li>
+        <li>相向进攻会先在途中进行遭遇战；胜者扣除战损后继续执行任务，败者后方仍会失去已经出征的兵力。</li>
+        <li>普通地形规则下，进攻路线跨河损耗 15%、穿越山脉或丘陵损耗 20%、穿越沙漠损耗 15%；己方调动不受任何地形减益。</li>
+        <li>联机房间可在开局前启用“天险与军事重镇”：线形山脉会阻断陆军通行，必须改走山口重镇；空降和海运不受山脉阻断。</li>
+        <li>机场和港口均需建设 8 回合，建设城市期间放弃增长；每个势力最多 4 个机场，机场可在 700 公里内空降，损耗 25%。</li>
+        <li>港口只能建于沿海城市。进入港口的出征兵力转为舰队并独立留在海上；登陆损耗 30%，舰艇不计入城市驻军。</li>
+        <li>同一城市受到陆海、陆空或海空协同可获得 20% 加成；陆海空齐备获得 45% 加成。攻城结算后的驻军只保留陆军与空降兵。</li>
+        <li>每个势力拥有首都；失守后自动迁都。首都防御提高 15%。</li>
+        <li>拥有机场且达到 30 兵的城市自动升级为特大城市，防御提高 25%，兵力上限提升至 45。</li>
+        <li>与首都的陆路、机场或港口补给线被切断即进入包围：防御降低 25%，停止增长并每回合损失 1 兵。</li>
+        <li>启用天险后，张家口、大同、阳泉、长治、锦州、三门峡、唐山、沈阳、济南、郑州为军事重镇，守军防御提高 25%。</li>
+        <li>多人“开拓模式”保留十雄与中立地区，“割据模式”复用单机八方固定版图；玩家未选择的历史势力全部由 NPC 接管。</li>
+        <li>多方混战按有效兵力同时结算；未启用天险时，原有山脉与丘陵仍按路线提供损耗和山地防御。</li>
+        <li>战斗后，每块补给畅通且未建设的非中立领地增长 3 兵；领地越多，总增长越快。</li>
+        <li>滚轮或右侧按钮可深度缩放，最大倍率下屏幕内约显示十个以内地级市；拖动空白区域平移。</li>
+        <li>可回到上一回合开始时，兵力、领地和 NPC 已锁定命令都会恢复。</li>
+      </ol>
+      <button class="dialog-primary" type="button" data-close-dialog>返回战场</button>
+    </dialog>
+
+    <dialog class="game-dialog playback-dialog" id="playback-dialog">
+      <span class="eyebrow">回合演示方式</span>
+      <h2>如何观看本回合作战？</h2>
+      <p class="dialog-intro">所有命令仍按同一时刻结算；这里只改变动画的观看方式。</p>
+      <div class="playback-options">
+        <button type="button" data-playback-mode="batches"><b>分批聚焦战场</b><small>自动放大并依次播放邻近战场</small></button>
+        <button type="button" data-playback-mode="overview"><b>全图同步播放</b><small>保持当前视野，一次播放全部路线</small></button>
+      </div>
+      <button class="dialog-secondary" type="button" data-playback-mode="cancel">返回部署</button>
+    </dialog>
+
+    <dialog class="game-dialog report-dialog" id="report-dialog">
+      <div class="dialog-head"><span class="eyebrow">回合战报</span><button type="button" data-close-dialog aria-label="关闭">×</button></div>
+      <h2 id="report-title">战局已结算</h2>
+      <div class="report-list" id="report-list"></div>
+      <button class="dialog-primary" type="button" data-close-dialog>继续部署</button>
+    </dialog>
+
+    <dialog class="game-dialog result-dialog" id="result-dialog">
+      <span class="result-seal" id="result-seal">胜</span>
+      <h2 id="result-title">战局结束</h2>
+      <p id="result-copy"></p>
+      <button class="dialog-secondary" id="result-rollback" type="button">回到上一回合</button>
+      <button class="dialog-primary" id="restart-game" type="button">重新选择势力</button>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

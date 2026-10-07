@@ -1,0 +1,20 @@
+{
+  "name": "war-game",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "War_Game 北方大战区同步回合制战略游戏",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test tests/*.test.mjs",
+    "test:multiplayer": "node tests/multiplayer-smoke.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
